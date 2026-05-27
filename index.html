@@ -4414,7 +4414,11 @@ function renderNewMou() {
 
   let body = '';
   if (STATE.newMouView === 'kanban') {
-    body = renderKanban(active);
+    if (STATE.newMouFilter === 'all') {
+      body = renderKanban(active);
+    } else {
+      body = renderFilteredGrid(filtered, STATE.newMouFilter);
+    }
   } else {
     body = renderListMou(filtered);
   }
@@ -4440,12 +4444,42 @@ function renderNewMou() {
       💡 두번째 사진 형식의 엑셀을 업로드하면 자동 입력 · <strong>📋 양식 다운로드</strong>로 입력용 빈 엑셀(예시·가이드 포함)을 받을 수 있습니다
       <br>🟡 <strong>업체명에 노란색 음영이 있는 행만 가져옴</strong> + <strong>음영이 빠진 기존 항목은 신규 칸반에서 자동 제거</strong> (=기존업체 전환 처리)
       <br>🚧 <strong>"허들 체크" 구분자 행</strong> 아래 업체들은 자동으로 <strong>허들·보류</strong> 탭으로 분류됩니다
+      <br>👻 <strong>엑셀에 더이상 없는 업체</strong>도 함께 자동 제거됩니다 (Excel = Source of Truth · 새 업체는 항상 엑셀에 먼저 추가)
     </div>
 
     ${filterPills}
     ${body}
   `;
   document.getElementById('view-newmou').innerHTML = html;
+}
+
+function renderFilteredGrid(filtered, stage) {
+  const label = STAGE_NAMES[stage] ? STAGE_NAMES[stage].label : '';
+  const waiting = STAGE_WAITING[stage] || '';
+  if (filtered.length === 0) {
+    return `
+      <div class="filter-grid-header" style="display:flex;align-items:center;gap:10px;padding:14px 18px;margin-bottom:14px;background:var(--bg-soft);border-left:4px solid var(--stage-${stage});border-radius:8px">
+        <span class="stage-mark" style="background:var(--stage-${stage});width:14px;height:14px;border-radius:4px;display:inline-block"></span>
+        <strong style="font-size:14px">${stage}. ${esc(label)}</strong>
+        <span style="font-size:12px;color:var(--text-lt)">→ ${esc(waiting)}</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--text-lt)">0건</span>
+      </div>
+      <div class="empty" style="padding:40px 20px;text-align:center;color:var(--text-lt)">
+        해당 단계에 업체가 없습니다.
+      </div>
+    `;
+  }
+  return `
+    <div class="filter-grid-header" style="display:flex;align-items:center;gap:10px;padding:14px 18px;margin-bottom:14px;background:var(--bg-soft);border-left:4px solid var(--stage-${stage});border-radius:8px">
+      <span class="stage-mark" style="background:var(--stage-${stage});width:14px;height:14px;border-radius:4px;display:inline-block"></span>
+      <strong style="font-size:14px">${stage}. ${esc(label)}</strong>
+      <span style="font-size:12px;color:var(--text-lt)">→ ${esc(waiting)}</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text-lt)">${filtered.length}건</span>
+    </div>
+    <div class="filter-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;align-items:start">
+      ${filtered.map(c => renderKanbanCard(c, stage)).join('')}
+    </div>
+  `;
 }
 
 function renderKanban(active) {
@@ -6390,10 +6424,52 @@ function importMouRows(rows, yellowMap) {
     } catch (e) {}
   }
 
+  // 노란색 필터 활성화 시: 엑셀에 아예 없는 잔존 업체도 자동 제거 (Excel = Source of Truth)
+  const ghostRemoved = [];
+  if (useYellowFilter) {
+    // 엑셀에 등장한 모든 업체명 (노란색 + 흰색 모두 포함)
+    const allExcelNames = new Set([
+      ...updated,    // 노란색으로 업데이트된 업체
+      ...added,      // 노란색으로 신규 추가된 업체
+      ...skippedNonYellow,  // 흰색이라 제외된 업체
+    ]);
+
+    // 1) DATA.newMou에서 엑셀에 없는 업체 제거
+    DATA.newMou = DATA.newMou.filter(c => {
+      if (!allExcelNames.has(c.company)) {
+        ghostRemoved.push(c.company);
+        return false;
+      }
+      return true;
+    });
+
+    // 2) localStorage의 newMouAdds에서도 제거
+    try {
+      const adds = lsGet('newMouAdds', []);
+      const cleanedAdds = adds.filter(a => allExcelNames.has(a.company));
+      if (cleanedAdds.length !== adds.length) {
+        lsSet('newMouAdds', cleanedAdds);
+      }
+    } catch (e) {}
+
+    // 3) mouOverrides에서도 제거
+    try {
+      const overridesObj = lsGet('mouOverrides', {});
+      let changed = false;
+      Object.keys(overridesObj).forEach(name => {
+        if (!allExcelNames.has(name)) {
+          delete overridesObj[name];
+          changed = true;
+        }
+      });
+      if (changed) lsSet('mouOverrides', overridesObj);
+    } catch (e) {}
+  }
+
   lsSet('mouOverrides', overrides);
   recalcMeta();
 
-  return { updated, added, skipped, skippedNonYellow, useYellowFilter, hurdleApplied, removedAsTransferred };
+  return { updated, added, skipped, skippedNonYellow, useYellowFilter, hurdleApplied, removedAsTransferred, ghostRemoved };
 }
 
 // ---------- 페이지 로드 시 추가된 항목 복원 ----------
@@ -6957,6 +7033,7 @@ function showImportResult(type, result) {
   const skippedNonYellow = result.skippedNonYellow || [];
   const hurdleApplied = result.hurdleApplied || [];
   const removedAsTransferred = result.removedAsTransferred || [];
+  const ghostRemoved = result.ghostRemoved || [];
   const useYellowFilter = result.useYellowFilter;
   const html = `
     <div class="import-result ${total > 0 ? 'success' : ''}">
@@ -6978,11 +7055,17 @@ function showImportResult(type, result) {
           🗑️ <strong>${removedAsTransferred.length}개 업체를 신규 칸반에서 제거</strong> — 엑셀에서 노란색이 빠진 업체 = 기존업체로 전환된 것으로 판단하여 자동 제거했습니다.
         </div>
       ` : ''}
+      ${ghostRemoved.length > 0 ? `
+        <div style="margin:8px 0;padding:8px 12px;background:#F4E8F4;border-left:3px solid #9D4A9F;border-radius:4px;font-size:12px;color:#5C5A66">
+          👻 <strong>${ghostRemoved.length}개 잔존 업체 자동 제거</strong> — 엑셀에 더이상 존재하지 않는 업체로 판단하여 함께 정리했습니다. (Excel = Source of Truth)
+        </div>
+      ` : ''}
       <div class="import-result-stat">
         <span>📝 업데이트: <strong>${result.updated.length}건</strong></span>
         <span>➕ 신규 추가: <strong>${result.added.length}건</strong></span>
         ${hurdleApplied.length > 0 ? `<span style="color:#C8364D">🚧 허들 분류: <strong>${hurdleApplied.length}건</strong></span>` : ''}
         ${removedAsTransferred.length > 0 ? `<span style="color:#4A90A4">🗑️ 전환 제거: <strong>${removedAsTransferred.length}건</strong></span>` : ''}
+        ${ghostRemoved.length > 0 ? `<span style="color:#9D4A9F">👻 잔존 제거: <strong>${ghostRemoved.length}건</strong></span>` : ''}
         ${skippedNonYellow.length > 0 ? `<span style="color:#E89817">🟡 노란색 외 제외: <strong>${skippedNonYellow.length}건</strong></span>` : ''}
         ${result.skipped.length > 0 ? `<span>⚠️ 건너뜀: <strong>${result.skipped.length}건</strong></span>` : ''}
       </div>
@@ -7001,6 +7084,10 @@ function showImportResult(type, result) {
       ${removedAsTransferred.length > 0 ? `
         <div style="font-size:11px;font-weight:700;margin-top:8px;color:#4A90A4">🗑️ 신규 칸반에서 제거된 업체 (기존업체 전환 처리):</div>
         <div class="import-result-list">${removedAsTransferred.map(esc).join(', ')}</div>
+      ` : ''}
+      ${ghostRemoved.length > 0 ? `
+        <div style="font-size:11px;font-weight:700;margin-top:8px;color:#9D4A9F">👻 엑셀에 없어서 자동 제거된 잔존 업체:</div>
+        <div class="import-result-list">${ghostRemoved.map(esc).join(', ')}</div>
       ` : ''}
       ${skippedNonYellow.length > removedAsTransferred.length ? `
         <div style="font-size:11px;font-weight:700;margin-top:8px;color:#E89817">🟡 노란색이 아니어서 가져오지 않은 업체 (시스템에 원래 없던 항목):</div>
@@ -7597,11 +7684,11 @@ function plExportExcel() {
   toast(`📥 ${filtered.length}건 엑셀 내보내기 완료`);
 }
 
-// ============ 양식 다운로드 ============
+// ============ 양식 다운로드 (3시트 통합) ============
 function plExportTemplate() {
-  const view = PL_STATE.view;
   const tplByView = {
     internal: {
+      sheetName: '내부용',
       headers: ['지역','상호','업체코드','대표자','사업자번호','주소','연락처','FAX','Email','협약체결','자본금','비고'],
       examples: [
         ['서울','㈜예시건설','26001','홍길동','123-45-67890','서울시 강남구 테헤란로 123','02-1234-5678','02-1234-5679','example@example.com','ㅇ26.04.30','5억','비고'],
@@ -7609,12 +7696,14 @@ function plExportTemplate() {
       ],
     },
     contractor: {
+      sheetName: '시공사 발송용',
       headers: ['지역','상호','대표자','주소','연락처','FAX'],
       examples: [
         ['서울','㈜예시건설','홍길동','서울시 강남구 테헤란로 123','02-1234-5678','02-1234-5679'],
       ],
     },
     external: {
+      sheetName: '외부 발송용',
       headers: ['지역','상호','대표자','주소','연락처'],
       examples: [
         ['서울','㈜예시건설','홍길동','서울시 강남구 테헤란로 123','02-1234-5678'],
@@ -7622,30 +7711,36 @@ function plExportTemplate() {
     },
   };
   
-  const tpl = tplByView[view];
-  const aoa = [tpl.headers, ...tpl.examples];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = tpl.headers.map(() => ({ wch: 20 }));
-  
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '협력업체 양식');
   
-  // 가이드
+  // 3개 시트 모두 추가
+  ['internal', 'contractor', 'external'].forEach(view => {
+    const tpl = tplByView[view];
+    const aoa = [tpl.headers, ...tpl.examples];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = tpl.headers.map(() => ({ wch: 20 }));
+    XLSX.utils.book_append_sheet(wb, ws, tpl.sheetName);
+  });
+  
+  // 가이드 시트
   const guide = [
     ['항목','내용'],
+    ['📋 통합 양식 안내','이 파일은 내부용 / 시공사 발송용 / 외부 발송용 3개 시트로 구성되어 있습니다'],
+    ['📤 가져오기 방식','이 파일을 그대로 업로드하면 3개 시트가 자동으로 각 탭에 분배 추가됩니다'],
+    ['🎯 시트별 단일 사용','특정 시트만 사용하고 싶다면 해당 시트 데이터만 채우고 나머지는 비워두세요'],
+    ['','(빈 시트는 자동으로 스킵됩니다)'],
     ['필수 컬럼','지역, 상호'],
     ['지역 형식','서울/경기/인천/강원/충남/충북/대전/세종/경북/대구/경남/부산/울산/전북/전남/광주/제주'],
-    ['업체명 중복','동일 상호 업체는 추가되지 않습니다'],
+    ['업체명 중복','동일 상호는 기존 데이터 업데이트, 없으면 신규 추가'],
     ['컬럼 순서','컬럼 순서가 바뀌어도 헤더명으로 자동 인식'],
-    ['시트 이름','첫 번째 시트의 데이터를 가져옵니다'],
+    ['시트 이름 인식','"내부", "시공사", "외부" 키워드로 자동 감지 (대소문자 무관)'],
   ];
   const wsG = XLSX.utils.aoa_to_sheet(guide);
-  wsG['!cols'] = [{ wch: 18 }, { wch: 70 }];
+  wsG['!cols'] = [{ wch: 20 }, { wch: 75 }];
   XLSX.utils.book_append_sheet(wb, wsG, '입력 가이드');
   
-  const viewLabels = { internal: '내부용', contractor: '시공사발송용', external: '외부발송용' };
-  XLSX.writeFile(wb, `협력업체리스트_${viewLabels[view]}_양식.xlsx`);
-  toast('📋 양식 다운로드 완료');
+  XLSX.writeFile(wb, `협력업체리스트_통합양식.xlsx`);
+  toast('📋 통합 양식 다운로드 완료 (3개 시트)');
 }
 
 // ============ PDF 내보내기 (세로 목록형) ============
@@ -7813,9 +7908,10 @@ function plShowImportModal() {
   const viewLabels = { internal: '내부용', contractor: '시공사 발송용', external: '외부 발송용' };
   const html = `
     <div class="form-banner">
-      엑셀 파일을 업로드하면 현재 보기 탭(<strong>${esc(viewLabels[view])}</strong>)에 데이터가 추가됩니다.
+      📋 <strong>두 가지 방식 모두 지원</strong>합니다:
+      <br>① <strong>단일 시트</strong>: 현재 보기 탭(<strong>${esc(viewLabels[view])}</strong>)에 데이터가 추가됩니다
+      <br>② <strong>다중 시트</strong>: 한 파일에 <code>내부용</code> / <code>시공사 발송용</code> / <code>외부 발송용</code> 시트가 모두 있으면 <strong>자동으로 각 탭에 분배</strong>됩니다
       <br>업체명이 동일하면 기존 데이터를 업데이트, 없으면 신규 추가됩니다.
-      <br>먼저 <strong>📋 양식 다운로드</strong>로 형식을 확인하세요.
     </div>
     <div class="form-row">
       <div class="form-label">엑셀 파일 선택</div>
@@ -7826,26 +7922,77 @@ function plShowImportModal() {
       <button class="btn primary" onclick="plConfirmImport()">📤 가져오기</button>
     </div>
   `;
-  openModal(`📤 협력업체 엑셀 가져오기 (${viewLabels[view]})`, html);
+  openModal(`📤 협력업체 엑셀 가져오기`, html);
+}
+
+// 시트 이름 → view key 자동 매칭
+function plDetectViewFromSheetName(sheetName) {
+  const n = String(sheetName || '').replace(/\s+/g, '').toLowerCase();
+  if (!n) return null;
+  // 내부용
+  if (n.includes('내부') || n === 'internal' || n.includes('internal')) return 'internal';
+  // 시공사 발송용 (시공사가 더 구체적이므로 외부보다 먼저 체크)
+  if (n.includes('시공사') || n.includes('contractor') || n.includes('시공')) return 'contractor';
+  // 외부 발송용
+  if (n.includes('외부') || n === 'external' || n.includes('external')) return 'external';
+  return null;
+}
+
+// 시트 하나를 처리해서 결과 반환
+function plProcessSheet(ws, view, keyMap) {
+  const rows = XLSX.utils.sheet_to_json(ws);
+  const result = { added: 0, updated: 0, skipped: 0, total: rows.length };
+  if (rows.length === 0) return result;
+
+  const adds = plGet(view + '_adds', []);
+  const overrides = plGet(view + '_overrides', {});
+  const baseData = (DATA.partnerList[view] || []);
+  const currentAdds = [...adds];
+  const currentOverrides = { ...overrides };
+
+  rows.forEach(row => {
+    const data = {};
+    Object.keys(row).forEach(k => {
+      const cleanK = String(k).trim();
+      const mapped = keyMap[cleanK];
+      if (mapped) {
+        data[mapped] = String(row[k] || '').trim();
+      }
+    });
+    if (!data.company) { result.skipped++; return; }
+
+    const existingBase = baseData.find(c => c.company === data.company);
+    const existingAdd = currentAdds.find(c => c.company === data.company);
+
+    if (existingBase) {
+      currentOverrides[data.company] = { ...existingBase, ...data };
+      result.updated++;
+    } else if (existingAdd) {
+      Object.assign(existingAdd, data);
+      result.updated++;
+    } else {
+      currentAdds.push(data);
+      result.added++;
+    }
+  });
+
+  plSet(view + '_adds', currentAdds);
+  plSet(view + '_overrides', currentOverrides);
+  return result;
 }
 
 function plConfirmImport() {
   const fileInput = document.getElementById('plImportFile');
   if (!fileInput.files[0]) { alert('파일을 선택하세요'); return; }
   
-  const view = PL_STATE.view;
+  const currentView = PL_STATE.view;
+  const viewLabels = { internal: '내부용', contractor: '시공사 발송용', external: '외부 발송용' };
   const file = fileInput.files[0];
   const reader = new FileReader();
   
   reader.onload = (e) => {
     try {
       const wb = XLSX.read(e.target.result, { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws);
-      
-      if (rows.length === 0) {
-        alert('데이터가 없습니다'); return;
-      }
       
       // 키 매핑 (한글 헤더 → 내부 키)
       const keyMap = {
@@ -7862,46 +8009,52 @@ function plConfirmImport() {
         '비고': 'note', '메모': 'note',
       };
       
-      const adds = plGet(view + '_adds', []);
-      const overrides = plGet(view + '_overrides', {});
-      const baseData = (DATA.partnerList[view] || []);
-      const currentAdds = [...adds];
-      const currentOverrides = { ...overrides };
+      // 시트 이름들 분석: view로 매칭되는 시트가 있는지 확인
+      const sheetMatches = wb.SheetNames.map(name => ({
+        name,
+        view: plDetectViewFromSheetName(name)
+      }));
       
-      let added = 0, updated = 0, skipped = 0;
+      const matched = sheetMatches.filter(s => s.view);
+      const multiSheetMode = matched.length >= 2; // 2개 이상이면 다중 시트 모드
       
-      rows.forEach(row => {
-        const data = {};
-        Object.keys(row).forEach(k => {
-          const cleanK = String(k).trim();
-          const mapped = keyMap[cleanK];
-          if (mapped) {
-            data[mapped] = String(row[k] || '').trim();
-          }
+      const results = []; // [{view, sheetName, result}]
+      
+      if (multiSheetMode) {
+        // 다중 시트 모드: 매칭된 시트들 모두 처리
+        // 같은 view에 여러 시트가 매칭되면 첫 번째만 사용 (중복 방지)
+        const usedViews = new Set();
+        matched.forEach(s => {
+          if (usedViews.has(s.view)) return;
+          usedViews.add(s.view);
+          const ws = wb.Sheets[s.name];
+          const result = plProcessSheet(ws, s.view, keyMap);
+          results.push({ view: s.view, sheetName: s.name, result });
         });
-        if (!data.company) { skipped++; return; }
-        
-        // 기존 base에 있는지 확인
-        const existingBase = baseData.find(c => c.company === data.company);
-        const existingAdd = currentAdds.find(c => c.company === data.company);
-        
-        if (existingBase) {
-          currentOverrides[data.company] = { ...existingBase, ...data };
-          updated++;
-        } else if (existingAdd) {
-          Object.assign(existingAdd, data);
-          updated++;
-        } else {
-          currentAdds.push(data);
-          added++;
-        }
-      });
-      
-      plSet(view + '_adds', currentAdds);
-      plSet(view + '_overrides', currentOverrides);
+      } else {
+        // 단일 시트 모드: 첫 시트만 현재 view에 처리
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const result = plProcessSheet(ws, currentView, keyMap);
+        if (result.total === 0) { alert('데이터가 없습니다'); return; }
+        results.push({ view: currentView, sheetName: wb.SheetNames[0], result });
+      }
       
       closeModal();
-      toast(`📤 가져오기 완료: 신규 ${added}건, 수정 ${updated}건${skipped > 0 ? ', 건너뜀 ' + skipped + '건' : ''}`);
+      
+      // 결과 메시지 구성
+      if (multiSheetMode) {
+        const totalAdded = results.reduce((s, r) => s + r.result.added, 0);
+        const totalUpdated = results.reduce((s, r) => s + r.result.updated, 0);
+        const totalSkipped = results.reduce((s, r) => s + r.result.skipped, 0);
+        const detail = results.map(r => 
+          `${viewLabels[r.view]}: 신규 ${r.result.added} · 수정 ${r.result.updated}`
+        ).join(' / ');
+        toast(`📤 다중 시트 가져오기 완료 (총 신규 ${totalAdded} · 수정 ${totalUpdated}${totalSkipped > 0 ? ' · 건너뜀 ' + totalSkipped : ''})\n${detail}`);
+      } else {
+        const r = results[0].result;
+        toast(`📤 가져오기 완료: 신규 ${r.added}건, 수정 ${r.updated}건${r.skipped > 0 ? ', 건너뜀 ' + r.skipped + '건' : ''}`);
+      }
+      
       renderPartnerList();
     } catch (err) {
       alert('엑셀 파일 읽기 실패: ' + err.message);
