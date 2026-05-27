@@ -6200,7 +6200,30 @@ function handleImportMou(file) {
       const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true, cellStyles: true });
       const sheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+      
+      // 헤더 행 자동 탐지: "업체명"이 있는 행을 헤더로 사용
+      // (1행에 제목, 2행에 실제 헤더가 있는 경우를 대응)
+      let headerRowIdx = 0;
+      if (sheet['!ref']) {
+        const range = XLSX.utils.decode_range(sheet['!ref']);
+        for (let r = range.s.r; r <= Math.min(range.s.r + 10, range.e.r); r++) {
+          for (let c = range.s.c; c <= range.e.c; c++) {
+            const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+            const val = cell && cell.v ? String(cell.v).trim() : '';
+            if (val === '업체명' || val === '회사명') {
+              headerRowIdx = r;
+              break;
+            }
+          }
+          if (headerRowIdx > 0) break;
+        }
+      }
+      
+      const rows = XLSX.utils.sheet_to_json(sheet, { 
+        defval: '', 
+        raw: false,
+        range: headerRowIdx,  // 자동 탐지한 헤더 행부터 파싱
+      });
       
       if (rows.length === 0) {
         alert('엑셀 파일에 데이터가 없습니다.');
