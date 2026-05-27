@@ -4438,7 +4438,7 @@ function renderNewMou() {
     </div>
     <div class="text-lt fs-11" style="margin:-8px 0 14px;padding:0 4px">
       💡 두번째 사진 형식의 엑셀을 업로드하면 자동 입력 · <strong>📋 양식 다운로드</strong>로 입력용 빈 엑셀(예시·가이드 포함)을 받을 수 있습니다
-      <br>🟡 <strong>업체명에 노란색 음영이 있는 행만 가져옴</strong> (음영 없는 행 = 기존업체 전환건으로 자동 제외)
+      <br>🟡 <strong>업체명에 노란색 음영이 있는 행만 가져옴</strong> + <strong>음영이 빠진 기존 항목은 신규 칸반에서 자동 제거</strong> (=기존업체 전환 처리)
       <br>🚧 <strong>"허들 체크" 구분자 행</strong> 아래 업체들은 자동으로 <strong>허들·보류</strong> 탭으로 분류됩니다
     </div>
 
@@ -6330,10 +6330,47 @@ function importMouRows(rows, yellowMap) {
     }
   });
 
+  // 노란색 필터 활성화 시: 엑셀에 있지만 노란색이 아닌 기존 항목 제거 (= 기존업체로 전환됨)
+  const removedAsTransferred = [];
+  if (useYellowFilter && skippedNonYellow.length > 0) {
+    const transferredNames = new Set(skippedNonYellow);
+
+    // 1) DATA.newMou에서 해당 업체 제거
+    DATA.newMou = DATA.newMou.filter(c => {
+      if (transferredNames.has(c.company)) {
+        removedAsTransferred.push(c.company);
+        return false;
+      }
+      return true;
+    });
+
+    // 2) localStorage의 newMouAdds에서도 제거
+    try {
+      const adds = lsGet('newMouAdds', []);
+      const cleanedAdds = adds.filter(a => !transferredNames.has(a.company));
+      if (cleanedAdds.length !== adds.length) {
+        lsSet('newMouAdds', cleanedAdds);
+      }
+    } catch (e) {}
+
+    // 3) mouOverrides에서도 제거
+    try {
+      const overridesObj = lsGet('mouOverrides', {});
+      let changed = false;
+      transferredNames.forEach(name => {
+        if (overridesObj[name]) {
+          delete overridesObj[name];
+          changed = true;
+        }
+      });
+      if (changed) lsSet('mouOverrides', overridesObj);
+    } catch (e) {}
+  }
+
   lsSet('mouOverrides', overrides);
   recalcMeta();
 
-  return { updated, added, skipped, skippedNonYellow, useYellowFilter, hurdleApplied };
+  return { updated, added, skipped, skippedNonYellow, useYellowFilter, hurdleApplied, removedAsTransferred };
 }
 
 // ---------- 페이지 로드 시 추가된 항목 복원 ----------
@@ -6896,6 +6933,7 @@ function showImportResult(type, result) {
   const total = result.updated.length + result.added.length;
   const skippedNonYellow = result.skippedNonYellow || [];
   const hurdleApplied = result.hurdleApplied || [];
+  const removedAsTransferred = result.removedAsTransferred || [];
   const useYellowFilter = result.useYellowFilter;
   const html = `
     <div class="import-result ${total > 0 ? 'success' : ''}">
@@ -6912,10 +6950,16 @@ function showImportResult(type, result) {
           🚧 <strong>"허들 체크" 구분자 감지</strong> — 그 아래 ${hurdleApplied.length}개 업체를 허들·보류로 자동 분류했습니다.
         </div>
       ` : ''}
+      ${removedAsTransferred.length > 0 ? `
+        <div style="margin:8px 0;padding:8px 12px;background:#E8F4F8;border-left:3px solid #4A90A4;border-radius:4px;font-size:12px;color:#5C5A66">
+          🗑️ <strong>${removedAsTransferred.length}개 업체를 신규 칸반에서 제거</strong> — 엑셀에서 노란색이 빠진 업체 = 기존업체로 전환된 것으로 판단하여 자동 제거했습니다.
+        </div>
+      ` : ''}
       <div class="import-result-stat">
         <span>📝 업데이트: <strong>${result.updated.length}건</strong></span>
         <span>➕ 신규 추가: <strong>${result.added.length}건</strong></span>
         ${hurdleApplied.length > 0 ? `<span style="color:#C8364D">🚧 허들 분류: <strong>${hurdleApplied.length}건</strong></span>` : ''}
+        ${removedAsTransferred.length > 0 ? `<span style="color:#4A90A4">🗑️ 전환 제거: <strong>${removedAsTransferred.length}건</strong></span>` : ''}
         ${skippedNonYellow.length > 0 ? `<span style="color:#E89817">🟡 노란색 외 제외: <strong>${skippedNonYellow.length}건</strong></span>` : ''}
         ${result.skipped.length > 0 ? `<span>⚠️ 건너뜀: <strong>${result.skipped.length}건</strong></span>` : ''}
       </div>
@@ -6931,9 +6975,13 @@ function showImportResult(type, result) {
         <div style="font-size:11px;font-weight:700;margin-top:8px;color:#C8364D">🚧 허들·보류로 분류된 업체:</div>
         <div class="import-result-list">${hurdleApplied.map(esc).join(', ')}</div>
       ` : ''}
-      ${skippedNonYellow.length > 0 ? `
-        <div style="font-size:11px;font-weight:700;margin-top:8px;color:#E89817">🟡 노란색이 아니어서 신규에서 제외된 업체 (기존업체 전환건, 앞 20개):</div>
-        <div class="import-result-list">${skippedNonYellow.slice(0, 20).map(esc).join(', ')}${skippedNonYellow.length > 20 ? ` 외 ${skippedNonYellow.length - 20}건` : ''}</div>
+      ${removedAsTransferred.length > 0 ? `
+        <div style="font-size:11px;font-weight:700;margin-top:8px;color:#4A90A4">🗑️ 신규 칸반에서 제거된 업체 (기존업체 전환 처리):</div>
+        <div class="import-result-list">${removedAsTransferred.map(esc).join(', ')}</div>
+      ` : ''}
+      ${skippedNonYellow.length > removedAsTransferred.length ? `
+        <div style="font-size:11px;font-weight:700;margin-top:8px;color:#E89817">🟡 노란색이 아니어서 가져오지 않은 업체 (시스템에 원래 없던 항목):</div>
+        <div class="import-result-list">${skippedNonYellow.filter(n => !removedAsTransferred.includes(n)).slice(0, 20).map(esc).join(', ')}</div>
       ` : ''}
       ${result.skipped.length > 0 ? `
         <div style="font-size:11px;font-weight:700;margin-top:8px;color:var(--warn)">건너뜀 (앞 10개):</div>
