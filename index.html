@@ -4320,8 +4320,61 @@ const REQUIRED_DOCS_FINAL = [
 ];
 
 // ============ Render: 신규 MOU 진행 ============
+// 칸반/리스트에서 제외할 항목 (등급 표시, 헤더 행 등 데이터 오류)
+const NEWMOU_EXCLUDE = new Set([
+  'S', 'A', 'B', 'C', 'D', 'N', 'F', '9',
+  'S등급', 'A등급', 'B등급', 'C등급', 'D등급', 'N등급', 'F등급',
+  '업체명', '총계', '구분', '등급', '구분(등급)', '고객군 총계', '등급설정X 및 입주자대표'
+]);
+
+function isValidMouCompany(c) {
+  if (!c || !c.company) return false;
+  const name = String(c.company).trim();
+  if (!name) return false;
+  if (NEWMOU_EXCLUDE.has(name)) return false;
+  return true;
+}
+
+// DATA.newMou에서 잘못된 항목 일괄 제거 + localStorage의 newMouAdds도 정리
+function cleanupInvalidMouEntries() {
+  if (Array.isArray(DATA.newMou)) {
+    const before = DATA.newMou.length;
+    DATA.newMou = DATA.newMou.filter(isValidMouCompany);
+    const removed = before - DATA.newMou.length;
+    if (removed > 0) {
+      console.log(`🧹 잘못된 newMou 항목 ${removed}개 제거`);
+    }
+  }
+  // localStorage의 newMouAdds도 정리
+  try {
+    const adds = lsGet('newMouAdds', []);
+    if (Array.isArray(adds)) {
+      const cleaned = adds.filter(isValidMouCompany);
+      if (cleaned.length !== adds.length) {
+        lsSet('newMouAdds', cleaned);
+        console.log(`🧹 newMouAdds에서 ${adds.length - cleaned.length}개 제거`);
+      }
+    }
+  } catch (e) {}
+  // mouOverrides의 잘못된 키도 정리
+  try {
+    const overrides = lsGet('mouOverrides', {});
+    let changed = false;
+    Object.keys(overrides).forEach(k => {
+      if (NEWMOU_EXCLUDE.has(String(k).trim())) {
+        delete overrides[k];
+        changed = true;
+      }
+    });
+    if (changed) {
+      lsSet('mouOverrides', overrides);
+    }
+  } catch (e) {}
+}
+
 function renderNewMou() {
   const active = DATA.newMou
+    .filter(isValidMouCompany)
     .filter(c => !c.hurdle && !c.mouDone)
     .filter(c => matchesSearch(c.company));
   
@@ -4385,6 +4438,8 @@ function renderNewMou() {
     </div>
     <div class="text-lt fs-11" style="margin:-8px 0 14px;padding:0 4px">
       💡 두번째 사진 형식의 엑셀을 업로드하면 자동 입력 · <strong>📋 양식 다운로드</strong>로 입력용 빈 엑셀(예시·가이드 포함)을 받을 수 있습니다
+      <br>🟡 <strong>업체명에 노란색 음영이 있는 행만 가져옴</strong> (음영 없는 행 = 기존업체 전환건으로 자동 제외)
+      <br>🚧 <strong>"허들 체크" 구분자 행</strong> 아래 업체들은 자동으로 <strong>허들·보류</strong> 탭으로 분류됩니다
     </div>
 
     ${filterPills}
@@ -6067,12 +6122,82 @@ function triggerImportMou() {
   document.getElementById('fileInputMou').click();
 }
 
+// 셀의 배경색이 노란색인지 판별 (FFFF00 계열)
+function isYellowFillCell(cell) {
+  if (!cell || !cell.s) return false;
+  const s = cell.s;
+  // SheetJS가 색을 저장할 수 있는 여러 경로를 모두 검사
+  const candidates = [
+    s.fgColor && s.fgColor.rgb,
+    s.bgColor && s.bgColor.rgb,
+    s.fill && s.fill.fgColor && s.fill.fgColor.rgb,
+    s.fill && s.fill.bgColor && s.fill.bgColor.rgb,
+    s.patternFill && s.patternFill.fgColor && s.patternFill.fgColor.rgb,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    const hex = String(c).toUpperCase().replace(/^#/, '');
+    // FFFF00 (노랑), FFFFFF00 (알파+노랑) 모두 매칭
+    if (hex.slice(-6) === 'FFFF00') return true;
+  }
+  return false;
+}
+
+// 시트에서 각 행의 업체명 셀이 노란색인지 매핑 {업체명: true/false}
+// 추가: "허들 체크" 행 이후의 업체들은 hurdle = true로 분류
+// 반환: { hasAnyYellow: bool, yellowSet: Set<업체명>, hurdleSet: Set<업체명> }
+function extractYellowMap(sheet) {
+  if (!sheet || !sheet['!ref']) return { hasAnyYellow: false, yellowSet: new Set(), hurdleSet: new Set() };
+  const range = XLSX.utils.decode_range(sheet['!ref']);
+  const yellowSet = new Set();
+  const hurdleSet = new Set();
+  let hasAnyYellow = false;
+  // 업체명 컬럼 위치 찾기 (헤더 행에서 '업체명' 또는 '회사명' 포함된 셀)
+  let nameCol = -1;
+  let headerRow = -1;
+  for (let r = range.s.r; r <= Math.min(range.s.r + 5, range.e.r); r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+      const val = cell && cell.v ? String(cell.v).trim() : '';
+      if (val === '업체명' || val === '회사명' || val === '업체') {
+        nameCol = c;
+        headerRow = r;
+        break;
+      }
+    }
+    if (nameCol >= 0) break;
+  }
+  if (nameCol < 0) {
+    // 헤더 못 찾으면 첫 열 가정
+    nameCol = range.s.c;
+    headerRow = range.s.r;
+  }
+  // 헤더 다음 행부터 검사 + "허들 체크" 구분자 감지
+  let inHurdleSection = false;
+  for (let r = headerRow + 1; r <= range.e.r; r++) {
+    const cell = sheet[XLSX.utils.encode_cell({ r, c: nameCol })];
+    if (!cell || !cell.v) continue;
+    const name = String(cell.v).trim();
+    if (!name) continue;
+    // "허들 체크" 구분자 발견 → 이후 행은 허들로 분류
+    if (name === '허들 체크' || name === '허들체크' || name.includes('허들')) {
+      inHurdleSection = true;
+      continue;  // 구분자 자체는 가져오지 않음
+    }
+    if (isYellowFillCell(cell)) {
+      yellowSet.add(name);
+      hasAnyYellow = true;
+      if (inHurdleSection) hurdleSet.add(name);
+    }
+  }
+  return { hasAnyYellow, yellowSet, hurdleSet };
+}
+
 function handleImportMou(file) {
   if (!file) return;
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
-      const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+      const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true, cellStyles: true });
       const sheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
@@ -6082,7 +6207,10 @@ function handleImportMou(file) {
         return;
       }
 
-      const result = importMouRows(rows);
+      // 노란색 셀 정보 추출
+      const yellowMap = extractYellowMap(sheet);
+
+      const result = importMouRows(rows, yellowMap);
       showImportResult('mou', result);
     } catch (err) {
       console.error(err);
@@ -6092,7 +6220,7 @@ function handleImportMou(file) {
   reader.readAsArrayBuffer(file);
 }
 
-function importMouRows(rows) {
+function importMouRows(rows, yellowMap) {
   const headerKeys = Object.keys(rows[0]);
   const findKey = (...patterns) => {
     for (const k of headerKeys) {
@@ -6120,15 +6248,34 @@ function importMouRows(rows) {
     return { error: '업체명 컬럼을 찾을 수 없습니다.' };
   }
 
+  // 노란색 필터링 활성화 여부: 파일에 노란 음영이 1개 이상 있으면 자동 활성화
+  const useYellowFilter = yellowMap && yellowMap.hasAnyYellow;
+  const yellowSet = yellowMap ? yellowMap.yellowSet : new Set();
+  const hurdleSet = yellowMap ? (yellowMap.hurdleSet || new Set()) : new Set();
+
   const updated = [];
   const added = [];
   const skipped = [];
+  const skippedNonYellow = [];  // 노란색 아니어서 제외된 업체
+  const hurdleApplied = [];  // 허들로 분류된 업체
 
   const overrides = lsGet('mouOverrides', {});
 
   rows.forEach(row => {
     const name = (row[kName] || '').toString().trim();
     if (!name) { skipped.push('(빈 업체명)'); return; }
+
+    // "허들 체크" 구분자 행 자체는 건너뜀
+    if (name === '허들 체크' || name === '허들체크') { return; }
+
+    // 노란색 필터링: 노란색이 아니면 건너뜀
+    if (useYellowFilter && !yellowSet.has(name)) {
+      skippedNonYellow.push(name);
+      return;
+    }
+
+    // 허들 여부 판정: "허들 체크" 구분자 아래 행이면 hurdle = true
+    const isHurdle = hurdleSet.has(name);
 
     const qs = parseDateCell(kQs ? row[kQs] : null);
     const qr = parseDateCell(kQr ? row[kQr] : null);
@@ -6159,30 +6306,34 @@ function importMouRows(rows) {
     const existing = DATA.newMou.find(c => c.company === name);
     if (existing) {
       Object.assign(existing, data);
+      // 허들 상태도 엑셀 기준으로 업데이트
+      existing.hurdle = isHurdle;
       existing.stage = recalcStage(existing);
       existing._modified = true;
-      overrides[name] = data;
+      overrides[name] = { ...data, hurdle: isHurdle };
       updated.push(name);
+      if (isHurdle) hurdleApplied.push(name);
     } else {
       // 신규 추가
       const newItem = {
-        company: name, hurdle: false, _added: true, _modified: true,
+        company: name, hurdle: isHurdle, _added: true, _modified: true,
         ...data,
       };
       newItem.stage = recalcStage(newItem);
       DATA.newMou.push(newItem);
       // adds 별도 저장 (페이지 로드 시 복원용)
       const adds = lsGet('newMouAdds', []);
-      adds.push({ ...data, company: name, hurdle: false });
+      adds.push({ ...data, company: name, hurdle: isHurdle });
       lsSet('newMouAdds', adds);
       added.push(name);
+      if (isHurdle) hurdleApplied.push(name);
     }
   });
 
   lsSet('mouOverrides', overrides);
   recalcMeta();
 
-  return { updated, added, skipped };
+  return { updated, added, skipped, skippedNonYellow, useYellowFilter, hurdleApplied };
 }
 
 // ---------- 페이지 로드 시 추가된 항목 복원 ----------
@@ -6743,14 +6894,29 @@ function showImportResult(type, result) {
   }
   
   const total = result.updated.length + result.added.length;
+  const skippedNonYellow = result.skippedNonYellow || [];
+  const hurdleApplied = result.hurdleApplied || [];
+  const useYellowFilter = result.useYellowFilter;
   const html = `
     <div class="import-result ${total > 0 ? 'success' : ''}">
       <div class="import-result-title">
         ${total > 0 ? '✅' : '⚠️'} 가져오기 완료
       </div>
+      ${useYellowFilter ? `
+        <div style="margin:8px 0;padding:8px 12px;background:#FFF9E6;border-left:3px solid #E89817;border-radius:4px;font-size:12px;color:#5C5A66">
+          🟡 <strong>노란색 음영 필터 자동 적용</strong> — 신규 진행 중인 업체(노란색)만 가져왔습니다.
+        </div>
+      ` : ''}
+      ${hurdleApplied.length > 0 ? `
+        <div style="margin:8px 0;padding:8px 12px;background:#FFF0F0;border-left:3px solid #C8364D;border-radius:4px;font-size:12px;color:#5C5A66">
+          🚧 <strong>"허들 체크" 구분자 감지</strong> — 그 아래 ${hurdleApplied.length}개 업체를 허들·보류로 자동 분류했습니다.
+        </div>
+      ` : ''}
       <div class="import-result-stat">
         <span>📝 업데이트: <strong>${result.updated.length}건</strong></span>
         <span>➕ 신규 추가: <strong>${result.added.length}건</strong></span>
+        ${hurdleApplied.length > 0 ? `<span style="color:#C8364D">🚧 허들 분류: <strong>${hurdleApplied.length}건</strong></span>` : ''}
+        ${skippedNonYellow.length > 0 ? `<span style="color:#E89817">🟡 노란색 외 제외: <strong>${skippedNonYellow.length}건</strong></span>` : ''}
         ${result.skipped.length > 0 ? `<span>⚠️ 건너뜀: <strong>${result.skipped.length}건</strong></span>` : ''}
       </div>
       ${result.added.length > 0 ? `
@@ -6760,6 +6926,14 @@ function showImportResult(type, result) {
       ${result.updated.length > 0 ? `
         <div style="font-size:11px;font-weight:700;margin-top:8px;color:var(--primary)">업데이트된 업체 (앞 20개):</div>
         <div class="import-result-list">${result.updated.slice(0, 20).map(esc).join(', ')}${result.updated.length > 20 ? ` 외 ${result.updated.length - 20}건` : ''}</div>
+      ` : ''}
+      ${hurdleApplied.length > 0 ? `
+        <div style="font-size:11px;font-weight:700;margin-top:8px;color:#C8364D">🚧 허들·보류로 분류된 업체:</div>
+        <div class="import-result-list">${hurdleApplied.map(esc).join(', ')}</div>
+      ` : ''}
+      ${skippedNonYellow.length > 0 ? `
+        <div style="font-size:11px;font-weight:700;margin-top:8px;color:#E89817">🟡 노란색이 아니어서 신규에서 제외된 업체 (기존업체 전환건, 앞 20개):</div>
+        <div class="import-result-list">${skippedNonYellow.slice(0, 20).map(esc).join(', ')}${skippedNonYellow.length > 20 ? ` 외 ${skippedNonYellow.length - 20}건` : ''}</div>
       ` : ''}
       ${result.skipped.length > 0 ? `
         <div style="font-size:11px;font-weight:700;margin-top:8px;color:var(--warn)">건너뜀 (앞 10개):</div>
@@ -8261,6 +8435,9 @@ function init() {
     }
   });
 
+  // 잘못된 newMou 항목 제거 (등급 표기, 헤더 행 등 데이터 오류)
+  cleanupInvalidMouEntries();
+
   // localStorage overrides + adds 적용
   applyAdds();      // 추가된 항목 (등급/MOU)
   applyOverrides(); // 단계 이동 변경사항
@@ -8433,6 +8610,7 @@ function fbApplyRemote(safeK, val) {
     try {
       if (typeof applyAdds === 'function') applyAdds();
       if (typeof applyOverrides === 'function') applyOverrides();
+      if (typeof cleanupInvalidMouEntries === 'function') cleanupInvalidMouEntries();
       const lastView = lsGet('lastView', 'dashboard');
       if (typeof setView === 'function') setView(lastView);
     } catch (e) { console.warn('재렌더 오류', e); }
@@ -8504,6 +8682,7 @@ function fbInit() {
     try {
       if (typeof applyAdds === 'function') applyAdds();
       if (typeof applyOverrides === 'function') applyOverrides();
+      if (typeof cleanupInvalidMouEntries === 'function') cleanupInvalidMouEntries();
       const lastView = lsGet('lastView', 'dashboard');
       if (typeof setView === 'function') setView(lastView);
     } catch (e) { console.warn('초기 렌더 오류', e); }
