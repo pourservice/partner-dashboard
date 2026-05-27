@@ -6467,6 +6467,16 @@ function importMouRows(rows, yellowMap) {
   }
 
   lsSet('mouOverrides', overrides);
+
+  // ⭐ 제거된 회사 목록을 mouDeleted에 누적 저장 (Firebase 동기화 → 새로고침 시 복구 방지)
+  if (removedAsTransferred.length > 0 || ghostRemoved.length > 0) {
+    const deletedList = lsGet('mouDeleted', []);
+    const deletedSet = new Set(deletedList);
+    removedAsTransferred.forEach(name => deletedSet.add(name));
+    ghostRemoved.forEach(name => deletedSet.add(name));
+    lsSet('mouDeleted', Array.from(deletedSet));
+  }
+
   recalcMeta();
 
   return { updated, added, skipped, skippedNonYellow, useYellowFilter, hurdleApplied, removedAsTransferred, ghostRemoved };
@@ -8725,6 +8735,13 @@ function applyAdds() {
     }
   });
   
+  // ⭐ 삭제된 MOU 항목 제거 (Firebase 동기화로 팀원 전체 반영)
+  const mouDeleted = lsGet('mouDeleted', []);
+  if (mouDeleted.length > 0) {
+    const deletedSet = new Set(mouDeleted);
+    DATA.newMou = DATA.newMou.filter(c => !deletedSet.has(c.company));
+  }
+  
   // meta 재계산
   if (typeof recalcGradeMeta === 'function') recalcGradeMeta();
   
@@ -8783,7 +8800,7 @@ function fbShouldSync(k) {
   if (k.startsWith('curriculumExpanded_')) return false;
 
   // 공유 데이터 → 동기화
-  const SYNC_EXACT = ['mouOverrides', 'newMouAdds', 'gradeOverrides', 'gradeAdds', 'hurdleActions'];
+  const SYNC_EXACT = ['mouOverrides', 'newMouAdds', 'mouDeleted', 'gradeOverrides', 'gradeAdds', 'hurdleActions'];
   if (SYNC_EXACT.includes(k)) return true;
   if (k.startsWith('partnerList_')) return true;
   if (k.startsWith('companyDocs_')) return true;
