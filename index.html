@@ -6,13 +6,13 @@
 <title>POUR공법 | 협력업체 통합 관리 대시보드</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
-<!-- Firebase SDK (compat 모드) -->
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+<!-- Firebase SDK (compat 모드) - defer로 파싱 비차단, 차단망에서도 본문은 정상 렌더 -->
+<script defer src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
 <style>
 :root {
   /* === 메인 4컬러 팔레트 (이미지 기반) === */
@@ -6315,10 +6315,7 @@ function importMouRows(rows, yellowMap) {
   const skipped = [];
   const skippedNonYellow = [];  // 노란색 아니어서 제외된 업체
   const hurdleApplied = [];  // 허들로 분류된 업체
-<<<<<<< HEAD
   const pendingAdds = [];  // ⭐ 신규 추가 배치 (루프 끝나고 한 번에 저장)
-=======
->>>>>>> 3e66a9c7e56e74dbf9e54e3774fadec8da8c317a
 
   const overrides = lsGet('mouOverrides', {});
 
@@ -6382,21 +6379,13 @@ function importMouRows(rows, yellowMap) {
       };
       newItem.stage = recalcStage(newItem);
       DATA.newMou.push(newItem);
-<<<<<<< HEAD
       // adds 메모리에만 push (루프 끝나고 한 번만 lsSet)
       pendingAdds.push({ ...data, company: name, hurdle: isHurdle });
-=======
-      // adds 별도 저장 (페이지 로드 시 복원용)
-      const adds = lsGet('newMouAdds', []);
-      adds.push({ ...data, company: name, hurdle: isHurdle });
-      lsSet('newMouAdds', adds);
->>>>>>> 3e66a9c7e56e74dbf9e54e3774fadec8da8c317a
       added.push(name);
       if (isHurdle) hurdleApplied.push(name);
     }
   });
 
-<<<<<<< HEAD
   // ⭐ 신규 추가를 한 번에 저장 (Firebase 가드/디바운스 누락 방지)
   if (pendingAdds.length > 0) {
     const currentAdds = lsGet('newMouAdds', []);
@@ -6404,8 +6393,6 @@ function importMouRows(rows, yellowMap) {
     lsSet('newMouAdds', currentAdds);
   }
 
-=======
->>>>>>> 3e66a9c7e56e74dbf9e54e3774fadec8da8c317a
   // 노란색 필터 활성화 시: 엑셀에 있지만 노란색이 아닌 기존 항목 제거 (= 기존업체로 전환됨)
   const removedAsTransferred = [];
   if (useYellowFilter && skippedNonYellow.length > 0) {
@@ -8798,12 +8785,24 @@ let FB_INITIALIZED = false;
 let FB_CONNECTED = false;
 const FB_WRITE_GUARD = {};
 
-try {
-  firebase.initializeApp(firebaseConfig);
-  FB_DB = firebase.database();
-  FB_BASE = FB_DB.ref('partner');
-} catch (e) {
-  console.error('Firebase 초기화 실패:', e);
+// Firebase 초기화: defer 스크립트 로드 완료 후 호출 (파싱 시점에 실행하지 않음)
+function setupFirebase() {
+  if (FB_BASE) return true;  // 이미 초기화됨
+  if (typeof firebase === 'undefined') {
+    console.warn('Firebase SDK 미로드 - 로컬 모드로 동작');
+    updateConnBadge(false);
+    return false;
+  }
+  try {
+    firebase.initializeApp(firebaseConfig);
+    FB_DB = firebase.database();
+    FB_BASE = FB_DB.ref('partner');
+    return true;
+  } catch (e) {
+    console.error('Firebase 초기화 실패:', e);
+    updateConnBadge(false);
+    return false;
+  }
 }
 
 // Firebase 경로 안전화 (. # $ [ ] / 금지)
@@ -8969,12 +8968,36 @@ function fbInit() {
   });
 }
 
-// init() 이후 Firebase 시작
-window.addEventListener('load', () => {
-  setTimeout(fbInit, 300);
-});
-
+// ⭐ 본문은 CDN과 무관하게 즉시 렌더 (Firebase SDK가 차단/지연돼도 화면은 정상)
 init();
+
+// ⭐ Firebase는 SDK 로드 완료 후 시작. defer 스크립트가 늦거나 차단될 수 있으므로
+//    load 이벤트 + 폴링(최대 10초)으로 SDK 준비되면 1회만 시작.
+let FB_START_DONE = false;
+function tryStartFirebase() {
+  if (FB_START_DONE) return;
+  if (typeof firebase === 'undefined') return;  // 아직 SDK 미로드 → 다음 폴링 대기
+  FB_START_DONE = true;
+  if (setupFirebase()) {
+    setTimeout(fbInit, 200);
+  }
+}
+
+window.addEventListener('load', tryStartFirebase);
+
+// SDK 로드 폴링 (load 이벤트가 지연되는 경우 대비, 0.5초 간격 최대 20회 = 10초)
+let fbPollCount = 0;
+const fbPollTimer = setInterval(() => {
+  fbPollCount++;
+  tryStartFirebase();
+  if (FB_START_DONE || fbPollCount >= 20) {
+    clearInterval(fbPollTimer);
+    // 10초 내내 SDK 미로드 → 로컬 모드 표시
+    if (!FB_START_DONE && typeof firebase === 'undefined') {
+      updateConnBadge(false);
+    }
+  }
+}, 500);
 
 // ESC 키로 모달 닫기
 document.addEventListener('keydown', (e) => {
