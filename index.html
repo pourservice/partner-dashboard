@@ -6315,6 +6315,10 @@ function importMouRows(rows, yellowMap) {
   const skipped = [];
   const skippedNonYellow = [];  // 노란색 아니어서 제외된 업체
   const hurdleApplied = [];  // 허들로 분류된 업체
+<<<<<<< HEAD
+  const pendingAdds = [];  // ⭐ 신규 추가 배치 (루프 끝나고 한 번에 저장)
+=======
+>>>>>>> 3e66a9c7e56e74dbf9e54e3774fadec8da8c317a
 
   const overrides = lsGet('mouOverrides', {});
 
@@ -6378,15 +6382,30 @@ function importMouRows(rows, yellowMap) {
       };
       newItem.stage = recalcStage(newItem);
       DATA.newMou.push(newItem);
+<<<<<<< HEAD
+      // adds 메모리에만 push (루프 끝나고 한 번만 lsSet)
+      pendingAdds.push({ ...data, company: name, hurdle: isHurdle });
+=======
       // adds 별도 저장 (페이지 로드 시 복원용)
       const adds = lsGet('newMouAdds', []);
       adds.push({ ...data, company: name, hurdle: isHurdle });
       lsSet('newMouAdds', adds);
+>>>>>>> 3e66a9c7e56e74dbf9e54e3774fadec8da8c317a
       added.push(name);
       if (isHurdle) hurdleApplied.push(name);
     }
   });
 
+<<<<<<< HEAD
+  // ⭐ 신규 추가를 한 번에 저장 (Firebase 가드/디바운스 누락 방지)
+  if (pendingAdds.length > 0) {
+    const currentAdds = lsGet('newMouAdds', []);
+    currentAdds.push(...pendingAdds);
+    lsSet('newMouAdds', currentAdds);
+  }
+
+=======
+>>>>>>> 3e66a9c7e56e74dbf9e54e3774fadec8da8c317a
   // 노란색 필터 활성화 시: 엑셀에 있지만 노란색이 아닌 기존 항목 제거 (= 기존업체로 전환됨)
   const removedAsTransferred = [];
   if (useYellowFilter && skippedNonYellow.length > 0) {
@@ -8809,7 +8828,8 @@ function fbShouldSync(k) {
   return false;
 }
 
-// 에코 방지용 가드 (300ms)
+// 디바운스: 빠른 연속 호출 시 마지막 값으로 Firebase에 송신 (300ms)
+const FB_PENDING_WRITES = {};
 function fbGuard(safeK) {
   if (FB_WRITE_GUARD[safeK]) clearTimeout(FB_WRITE_GUARD[safeK]);
   FB_WRITE_GUARD[safeK] = setTimeout(() => { delete FB_WRITE_GUARD[safeK]; }, 300);
@@ -8826,24 +8846,29 @@ function updateConnBadge(connected) {
     : '<span style="color:#dc2626">🔴 오프라인</span>';
 }
 
-// lsSet 가로채기: 로컬 저장 + Firebase 쓰기
+// lsSet 가로채기: 로컬 즉시 저장 + Firebase 디바운스 쓰기
 const _lsSetOriginal = lsSet;
 window.lsSet = function(k, v) {
   _lsSetOriginal(k, v);
   if (!FB_BASE) return;
   if (!fbShouldSync(k)) return;
   const safeK = fbSafeKey(k);
-  if (fbIsGuarded(safeK)) return;
-  fbGuard(safeK);
-  FB_BASE.child(safeK).set(v).catch(err => {
-    console.warn('FB write 실패:', k, err);
-  });
+
+  // ⭐ 디바운스: 연속 호출 시 마지막 값으로 한 번만 송신 (가드로 누락되던 문제 수정)
+  if (FB_PENDING_WRITES[safeK]) clearTimeout(FB_PENDING_WRITES[safeK]);
+  FB_PENDING_WRITES[safeK] = setTimeout(() => {
+    delete FB_PENDING_WRITES[safeK];
+    // 최신 localStorage 값을 읽어서 송신 (중간에 변경됐을 수도 있음)
+    let latestVal;
+    try { latestVal = lsGet(k, v); } catch(e) { latestVal = v; }
+    FB_BASE.child(safeK).set(latestVal).catch(err => {
+      console.warn('FB write 실패:', k, err);
+    });
+  }, 200);
 };
 
-// 원격 변경 적용
+// 원격 변경 적용 (fbApplyRemote는 _lsSetOriginal 호출 → window.lsSet 가로채기 거치지 않으므로 에코 안 일어남)
 function fbApplyRemote(safeK, val) {
-  if (fbIsGuarded(safeK)) return;
-  fbGuard(safeK);
   _lsSetOriginal(safeK, val);
   // 모달이 열려있지 않을 때만 자동 재렌더 (편집 중 방해 방지)
   const modalOpen = document.getElementById('modal')?.classList.contains('show');
