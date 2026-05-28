@@ -2899,8 +2899,25 @@ const lsGet = (k, def) => {
     return v == null ? def : JSON.parse(v);
   } catch { return def; }
 };
-const lsSet = (k, v) => {
+const lsSetLocalOnly = (k, v) => {
   try { localStorage.setItem(LS_KEY_PREFIX + k, JSON.stringify(v)); } catch {}
+};
+const lsSet = (k, v) => {
+  // 1) 로컬 즉시 저장
+  lsSetLocalOnly(k, v);
+  // 2) Firebase 디바운스 쓰기 (FB_BASE 준비된 동기화 대상 키만)
+  try {
+    if (FB_BASE && typeof fbShouldSync === 'function' && fbShouldSync(k)) {
+      const safeK = fbSafeKey(k);
+      if (FB_PENDING_WRITES[safeK]) clearTimeout(FB_PENDING_WRITES[safeK]);
+      FB_PENDING_WRITES[safeK] = setTimeout(() => {
+        delete FB_PENDING_WRITES[safeK];
+        let latestVal;
+        try { latestVal = lsGet(k, v); } catch (e) { latestVal = v; }
+        FB_BASE.child(safeK).set(latestVal).catch(err => console.warn('FB write 실패:', k, err));
+      }, 200);
+    }
+  } catch (e) { /* FB 아직 준비 안 됨(파싱 초기) → 로컬만 저장하고 무시 */ }
 };
 
 // ============ Toast ============
@@ -8827,13 +8844,34 @@ function fbShouldSync(k) {
   return false;
 }
 
-// 디바운스: 빠른 연속 호출 시 마지막 값으로 Firebase에 송신 (300ms)
+// 디바운스: 빠른 연속 호출 시 마지막 값으로 Firebase에 송신
 const FB_PENDING_WRITES = {};
 function fbGuard(safeK) {
   if (FB_WRITE_GUARD[safeK]) clearTimeout(FB_WRITE_GUARD[safeK]);
   FB_WRITE_GUARD[safeK] = setTimeout(() => { delete FB_WRITE_GUARD[safeK]; }, 300);
 }
 function fbIsGuarded(safeK) { return !!FB_WRITE_GUARD[safeK]; }
+
+// ⭐ 대기 중인 모든 Firebase 쓰기를 즉시 실행 (새로고침/페이지 이탈 직전 유실 방지)
+function fbFlushPending() {
+  if (!FB_BASE) return;
+  Object.keys(FB_PENDING_WRITES).forEach(safeK => {
+    clearTimeout(FB_PENDING_WRITES[safeK]);
+    delete FB_PENDING_WRITES[safeK];
+  });
+  // 동기화 대상 키 전체를 localStorage 최신값으로 즉시 송신
+  for (let i = 0; i < localStorage.length; i++) {
+    const fullKey = localStorage.key(i);
+    if (!fullKey || !fullKey.startsWith(LS_KEY_PREFIX)) continue;
+    const k = fullKey.substring(LS_KEY_PREFIX.length);
+    if (!fbShouldSync(k)) continue;
+    try {
+      const safeK = fbSafeKey(k);
+      const val = lsGet(k, null);
+      if (val != null) FB_BASE.child(safeK).set(val);
+    } catch (e) {}
+  }
+}
 
 // 연결 상태 배지
 function updateConnBadge(connected) {
@@ -8845,28 +8883,10 @@ function updateConnBadge(connected) {
     : '<span style="color:#dc2626">🔴 오프라인</span>';
 }
 
-// lsSet 가로채기: 로컬 즉시 저장 + Firebase 디바운스 쓰기
-const _lsSetOriginal = lsSet;
-window.lsSet = function(k, v) {
-  _lsSetOriginal(k, v);
-  if (!FB_BASE) return;
-  if (!fbShouldSync(k)) return;
-  const safeK = fbSafeKey(k);
+// 원격→로컬 적용용 로컬 전용 setter (Firebase 재송신 안 함 → 에코 방지)
+const _lsSetOriginal = lsSetLocalOnly;
 
-  // ⭐ 디바운스: 연속 호출 시 마지막 값으로 한 번만 송신 (가드로 누락되던 문제 수정)
-  if (FB_PENDING_WRITES[safeK]) clearTimeout(FB_PENDING_WRITES[safeK]);
-  FB_PENDING_WRITES[safeK] = setTimeout(() => {
-    delete FB_PENDING_WRITES[safeK];
-    // 최신 localStorage 값을 읽어서 송신 (중간에 변경됐을 수도 있음)
-    let latestVal;
-    try { latestVal = lsGet(k, v); } catch(e) { latestVal = v; }
-    FB_BASE.child(safeK).set(latestVal).catch(err => {
-      console.warn('FB write 실패:', k, err);
-    });
-  }, 200);
-};
-
-// 원격 변경 적용 (fbApplyRemote는 _lsSetOriginal 호출 → window.lsSet 가로채기 거치지 않으므로 에코 안 일어남)
+// 원격 변경 적용 (로컬 전용 setter 사용 → Firebase 재송신 안 함 → 에코 루프 방지)
 function fbApplyRemote(safeK, val) {
   _lsSetOriginal(safeK, val);
   // 모달이 열려있지 않을 때만 자동 재렌더 (편집 중 방해 방지)
@@ -8998,6 +9018,12 @@ const fbPollTimer = setInterval(() => {
     }
   }
 }, 500);
+
+// ⭐ 페이지 떠나기/숨김 직전 대기 중인 Firebase 쓰기 즉시 송신 (새로고침 빨리 눌러도 유실 방지)
+window.addEventListener('beforeunload', () => { try { fbFlushPending(); } catch (e) {} });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { try { fbFlushPending(); } catch (e) {} }
+});
 
 // ESC 키로 모달 닫기
 document.addEventListener('keydown', (e) => {
